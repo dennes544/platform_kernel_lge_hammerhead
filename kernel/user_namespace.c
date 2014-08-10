@@ -86,6 +86,130 @@ void free_user_ns(struct kref *kref)
 }
 EXPORT_SYMBOL(free_user_ns);
 
+static u32 map_id_down(struct uid_gid_map *map, u32 id)
+{
+	unsigned idx, extents;
+	u32 first, last;
+
+	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
+	for (idx = 0; idx < extents; idx++) {
+		first = map->extent[idx].first;
+		last = first + map->extent[idx].count - 1;
+		if (id >= first && id <= last)
+			break;
+	}
+	/* Map the id or note failure */
+	if (idx < extents)
+		id = (id - first) + map->extent[idx].lower_first;
+	else
+		id = (u32) -1;
+
+	return id;
+}
+
+static u32 map_id_up(struct uid_gid_map *map, u32 id)
+{
+	unsigned idx, extents;
+	u32 first, last;
+
+	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
+	for (idx = 0; idx < extents; idx++) {
+		first = map->extent[idx].lower_first;
+		last = first + map->extent[idx].count - 1;
+		if (id >= first && id <= last)
+			break;
+	}
+	/* Map the id or note failure */
+	if (idx < extents)
+		id = (id - first) + map->extent[idx].first;
+	else
+		id = (u32) -1;
+
+	return id;
+}
+
+/**
+ *	make_kuid - Map a user-namespace uid pair into a kuid.
+ *	@ns:  User namespace that the uid is in
+ *	@uid: User identifier
+ *
+ *	Maps a user-namespace uid pair into a kernel internal kuid,
+ *	and returns that kuid.
+ *
+ *	When there is no mapping defined for the user-namespace uid
+ *	pair INVALID_UID is returned.  Callers are expected to test
+ *	for and handle INVALID_UID being returned.  INVALID_UID
+ *	may be tested for using uid_valid().
+ */
+kuid_t make_kuid(struct user_namespace *ns, uid_t uid)
+{
+	/* Map the uid to a global kernel uid */
+	return KUIDT_INIT(map_id_down(&ns->uid_map, uid));
+}
+EXPORT_SYMBOL(make_kuid);
+
+/**
+ *	from_kuid - Create a uid from a kuid user-namespace pair.
+ *	@targ: The user namespace we want a uid in.
+ *	@kuid: The kernel internal uid to start with.
+ *
+ *	Map @kuid into the user-namespace specified by @targ and
+ *	return the resulting uid.
+ *
+ *	There is always a mapping into the initial user_namespace.
+ *
+ *	If @kuid has no mapping in @targ (uid_t)-1 is returned.
+ */
+uid_t from_kuid(struct user_namespace *targ, kuid_t kuid)
+{
+	/* Map the uid from a global kernel uid */
+	return map_id_up(&targ->uid_map, __kuid_val(kuid));
+}
+EXPORT_SYMBOL(from_kuid);
+
+/**
+ *	make_kgid - Map a user-namespace gid pair into a kgid.
+ *	@ns:  User namespace that the gid is in
+ *	@gid: group identifier
+ *
+ *	Maps a user-namespace gid pair into a kernel internal kgid,
+ *	and returns that kgid.
+ *
+ *	When there is no mapping defined for the user-namespace gid
+ *	pair INVALID_GID is returned.  Callers are expected to test
+ *	for and handle INVALID_GID being returned.  INVALID_GID may be
+ *	tested for using gid_valid().
+ */
+kgid_t make_kgid(struct user_namespace *ns, gid_t gid)
+{
+	/* Map the gid to a global kernel gid */
+	return KGIDT_INIT(map_id_down(&ns->gid_map, gid));
+}
+EXPORT_SYMBOL(make_kgid);
+
+/**
+ *	from_kgid - Create a gid from a kgid user-namespace pair.
+ *	@targ: The user namespace we want a gid in.
+ *	@kgid: The kernel internal gid to start with.
+ *
+ *	Map @kgid into the user-namespace specified by @targ and
+ *	return the resulting gid.
+ *
+ *	There is always a mapping into the initial user_namespace.
+ *
+ *	If @kgid has no mapping in @targ (gid_t)-1 is returned.
+ */
+gid_t from_kgid(struct user_namespace *targ, kgid_t kgid)
+{
+	/* Map the gid from a global kernel gid */
+	return map_id_up(&targ->gid_map, __kgid_val(kgid));
+}
+EXPORT_SYMBOL(from_kgid);
+
 uid_t user_ns_map_uid(struct user_namespace *to, const struct cred *cred, uid_t uid)
 {
 	struct user_namespace *tmp;

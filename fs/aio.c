@@ -1437,6 +1437,8 @@ static ssize_t aio_fsync(struct kiocb *iocb)
 	return ret;
 }
 
+typedef ssize_t (rw_iter_op)(struct kiocb *, struct iov_iter *);
+
 static ssize_t aio_setup_vectored_rw(int type, struct kiocb *kiocb, bool compat)
 {
 	ssize_t ret;

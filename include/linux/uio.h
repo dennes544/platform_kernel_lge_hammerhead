@@ -3,6 +3,7 @@
 
 #include <linux/compiler.h>
 #include <linux/types.h>
+#include <linux/fs.h>
 
 /*
  *	Berkeley style UIO structures	-	Alan Cox 1994.
@@ -33,6 +34,12 @@ struct kvec {
 	size_t iov_len;
 };
 
+enum {
+	ITER_IOVEC = 0,
+	ITER_KVEC = 2,
+	ITER_BVEC = 4,
+};
+
 /*
  * Total number of bytes covered by an iovec.
  *
@@ -51,6 +58,27 @@ static inline size_t iov_length(const struct iovec *iov, unsigned long nr_segs)
 }
 
 unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to);
+size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
+			 struct iov_iter *i);
+void __iov_iter_init(struct iov_iter *i, int direction, const struct iovec *iov,
+			unsigned long nr_segs, size_t count);
+/*
+ * Cap the iov_iter by given limit; note that the second argument is
+ * *not* the new size - it's upper limit for such.  Passing it a value
+ * greater than the amount of data in iov_iter is fine - it'll just do
+ * nothing in that case.
+ */
+static inline void iov_iter_truncate(struct iov_iter *i, u64 count)
+{
+	/*
+	 * count doesn't have to fit in size_t - comparison extends both
+	 * operands to u64 here and any value that would be truncated by
+	 * conversion in assignement is by definition greater than all
+	 * values of size_t, including old i->count.
+	 */
+	if (i->count > count)
+		i->count = count;
+}
 #endif
 
 #endif

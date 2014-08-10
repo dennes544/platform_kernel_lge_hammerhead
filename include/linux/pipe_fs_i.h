@@ -47,6 +47,7 @@ struct pipe_inode_info {
 	unsigned int nrbufs, curbuf, buffers;
 	unsigned int readers;
 	unsigned int writers;
+	unsigned int files;
 	unsigned int waiting_writers;
 	unsigned int r_counter;
 	unsigned int w_counter;
@@ -161,5 +162,7 @@ void generic_pipe_buf_release(struct pipe_inode_info *, struct pipe_buffer *);
 /* for F_SETPIPE_SZ and F_GETPIPE_SZ */
 long pipe_fcntl(struct file *, unsigned int, unsigned long arg);
 struct pipe_inode_info *get_pipe_info(struct file *file);
+
+int create_pipe_files(struct file **, int);
 
 #endif

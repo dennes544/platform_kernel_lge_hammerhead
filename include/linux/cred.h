@@ -17,6 +17,7 @@
 #include <linux/key.h>
 #include <linux/selinux.h>
 #include <linux/atomic.h>
+#include <linux/uidgid.h>
 
 struct user_struct;
 struct cred;
@@ -130,6 +131,8 @@ struct cred {
 	gid_t		egid;		/* effective GID of the task */
 	uid_t		fsuid;		/* UID for VFS ops */
 	gid_t		fsgid;		/* GID for VFS ops */
+	kuid_t		kfsuid;          /* UID for VFS ops */
+	kgid_t		kfsgid;          /* GID for VFS ops */
 	unsigned	securebits;	/* SUID-less security management */
 	kernel_cap_t	cap_inheritable; /* caps our children can inherit */
 	kernel_cap_t	cap_permitted;	/* caps we're permitted */

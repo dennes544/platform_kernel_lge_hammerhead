@@ -135,8 +135,8 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_fop = &empty_fops;
 	inode->__i_nlink = 1;
 	inode->i_opflags = 0;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
+	i_uid_write(inode, 0);
+	i_gid_write(inode, 0);
 	atomic_set(&inode->i_writecount, 0);
 	inode->i_size = 0;
 	inode->i_blocks = 0;
@@ -1480,6 +1480,27 @@ static int relatime_need_update(struct vfsmount *mnt, struct inode *inode,
 	return 0;
 }
 
+/*
+ * This does the actual work of updating an inodes time or version.  Must have
+ * had called mnt_want_write() before calling this.
+ */
+static int update_time(struct inode *inode, struct timespec *time, int flags)
+{
+	if (inode->i_op->update_time)
+		return inode->i_op->update_time(inode, time, flags);
+
+	if (flags & S_ATIME)
+		inode->i_atime = *time;
+	if (flags & S_VERSION)
+		inode_inc_iversion(inode);
+	if (flags & S_CTIME)
+		inode->i_ctime = *time;
+	if (flags & S_MTIME)
+		inode->i_mtime = *time;
+	mark_inode_dirty_sync(inode);
+	return 0;
+}
+
 /**
  *	touch_atime	-	update the access time
  *	@mnt: mount the inode is accessed on
@@ -1574,6 +1595,54 @@ void file_update_time(struct file *file)
 	mnt_drop_write_file(file);
 }
 EXPORT_SYMBOL(file_update_time);
+
+/**
+ *	__file_update_time	-	update mtime and ctime time
+ *	@file: file accessed
+ *
+ *	Update the mtime and ctime members of an inode and mark the inode
+ *	for writeback.  Note that this function is meant exclusively for
+ *	usage in the file write path of filesystems, and filesystems may
+ *	choose to explicitly ignore update via this function with the
+ *	S_NOCMTIME inode flag, e.g. for network filesystem where these
+ *	timestamps are handled by the server.  This can return an error for
+ *	file systems who need to allocate space in order to update an inode.
+ */
+
+int __file_update_time(struct file *file)
+{
+	struct inode *inode = file_inode(file);
+	struct timespec now;
+	int sync_it = 0;
+	int ret;
+
+	/* First try to exhaust all avenues to not sync */
+	if (IS_NOCMTIME(inode))
+		return 0;
+
+	now = current_fs_time(inode->i_sb);
+	if (!timespec_equal(&inode->i_mtime, &now))
+		sync_it = S_MTIME;
+
+	if (!timespec_equal(&inode->i_ctime, &now))
+		sync_it |= S_CTIME;
+
+	if (IS_I_VERSION(inode))
+		sync_it |= S_VERSION;
+
+	if (!sync_it)
+		return 0;
+
+	/* Finally allowed to write? Takes lock. */
+	if (__mnt_want_write_file(file))
+		return 0;
+
+	ret = update_time(inode, &now, sync_it);
+	__mnt_drop_write_file(file);
+
+	return ret;
+}
+EXPORT_SYMBOL(__file_update_time);
 
 int inode_needs_sync(struct inode *inode)
 {
@@ -1734,7 +1803,7 @@ bool inode_owner_or_capable(const struct inode *inode)
 {
 	struct user_namespace *ns = inode_userns(inode);
 
-	if (current_user_ns() == ns && current_fsuid() == inode->i_uid)
+	if (uid_eq(current_fsuid(), inode->i_uid))
 		return true;
 	if (ns_capable(ns, CAP_FOWNER))
 		return true;

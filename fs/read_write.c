@@ -20,6 +20,8 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
+typedef ssize_t (*iter_fn_t)(struct kiocb *, struct iov_iter *);
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read		= do_sync_read,
@@ -34,6 +36,33 @@ static inline int unsigned_offsets(struct file *file)
 {
 	return file->f_mode & FMODE_UNSIGNED_OFFSET;
 }
+
+/**
+ * vfs_setpos - update the file offset for lseek
+ * @file:	file structure in question
+ * @offset:	file offset to seek to
+ * @maxsize:	maximum file size
+ *
+ * This is a low-level filesystem helper for updating the file offset to
+ * the value specified by @offset if the given offset is valid and it is
+ * not equal to the current file offset.
+ *
+ * Return the specified offset on success and -EINVAL on invalid offset.
+ */
+loff_t vfs_setpos(struct file *file, loff_t offset, loff_t maxsize)
+{
+	if (offset < 0 && !unsigned_offsets(file))
+		return -EINVAL;
+	if (offset > maxsize)
+		return -EINVAL;
+
+	if (offset != file->f_pos) {
+		file->f_pos = offset;
+		file->f_version = 0;
+	}
+	return offset;
+}
+EXPORT_SYMBOL(vfs_setpos);
 
 static loff_t lseek_execute(struct file *file, struct inode *inode,
 		loff_t offset, loff_t maxsize)
@@ -116,6 +145,72 @@ generic_file_llseek_size(struct file *file, loff_t offset, int origin,
 	return lseek_execute(file, inode, offset, maxsize);
 }
 EXPORT_SYMBOL(generic_file_llseek_size);
+
+/**
+ * V3.15
+ * __generic_file_llseek_size - generic llseek implementation for regular files
+ * @file:	file structure to seek on
+ * @offset:	file offset to seek to
+ * @whence:	type of seek
+ * @size:	max size of this file in file system
+ * @eof:	offset used for SEEK_END position
+ *
+ * This is a variant of generic_file_llseek that allows passing in a custom
+ * maximum file size and a custom EOF position, for e.g. hashed directories
+ *
+ * Synchronization:
+ * SEEK_SET and SEEK_END are unsynchronized (but atomic on 64bit platforms)
+ * SEEK_CUR is synchronized against other SEEK_CURs, but not read/writes.
+ * read/writes behave like SEEK_SET against seeks.
+ */
+loff_t
+__generic_file_llseek_size(struct file *file, loff_t offset, int whence,
+		loff_t maxsize, loff_t eof)
+{
+	switch (whence) {
+	case SEEK_END:
+		offset += eof;
+		break;
+	case SEEK_CUR:
+		/*
+		 * Here we special-case the lseek(fd, 0, SEEK_CUR)
+		 * position-querying operation.  Avoid rewriting the "same"
+		 * f_pos value back to the file because a concurrent read(),
+		 * write() or lseek() might have altered it
+		 */
+		if (offset == 0)
+			return file->f_pos;
+		/*
+		 * f_lock protects against read/modify/write race with other
+		 * SEEK_CURs. Note that parallel writes and reads behave
+		 * like SEEK_SET.
+		 */
+		spin_lock(&file->f_lock);
+		offset = vfs_setpos(file, file->f_pos + offset, maxsize);
+		spin_unlock(&file->f_lock);
+		return offset;
+	case SEEK_DATA:
+		/*
+		 * In the generic case the entire file is data, so as long as
+		 * offset isn't at the end of the file then the offset is data.
+		 */
+		if (offset >= eof)
+			return -ENXIO;
+		break;
+	case SEEK_HOLE:
+		/*
+		 * There is a virtual hole at the end of the file, so as long as
+		 * offset isn't i_size or larger, return i_size.
+		 */
+		if (offset >= eof)
+			return -ENXIO;
+		offset = eof;
+		break;
+	}
+
+	return vfs_setpos(file, offset, maxsize);
+}
+EXPORT_SYMBOL(__generic_file_llseek_size);
 
 /**
  * generic_file_llseek - generic llseek implementation for regular files
@@ -361,6 +456,27 @@ ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *pp
 
 EXPORT_SYMBOL(do_sync_read);
 
+ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
+{
+	struct iovec iov = { .iov_base = buf, .iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	kiocb.ki_nbytes = len;
+	__iov_iter_init(&iter, READ, &iov, 1, len);
+
+	ret = filp->f_op->read_iter(&kiocb, &iter);
+	if (-EIOCBQUEUED == ret)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+	return ret;
+}
+
+EXPORT_SYMBOL(new_sync_read);
+
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
@@ -377,8 +493,10 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 		count = ret;
 		if (file->f_op->read)
 			ret = file->f_op->read(file, buf, count, pos);
-		else
+		else if (file->f_op->aio_read)
 			ret = do_sync_read(file, buf, count, pos);
+		else
+			ret = new_sync_read(file, buf, count, pos);
 		if (ret > 0) {
 			fsnotify_access(file);
 			add_rchar(current, ret);
@@ -417,6 +535,27 @@ ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, lof
 
 EXPORT_SYMBOL(do_sync_write);
 
+ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
+{
+	struct iovec iov = { .iov_base = (void __user *)buf, .iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	kiocb.ki_nbytes = len;
+	__iov_iter_init(&iter, WRITE, &iov, 1, len);
+
+	ret = filp->f_op->write_iter(&kiocb, &iter);
+	if (-EIOCBQUEUED == ret)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+	return ret;
+}
+
+EXPORT_SYMBOL(new_sync_write);
+
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
@@ -433,8 +572,10 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		count = ret;
 		if (file->f_op->write)
 			ret = file->f_op->write(file, buf, count, pos);
-		else
+		else if (file->f_op->aio_write)
 			ret = do_sync_write(file, buf, count, pos);
+		else
+			ret = new_sync_write(file, buf, count, pos);
 		if (ret > 0) {
 			fsnotify_modify(file);
 			add_wchar(current, ret);
@@ -570,6 +711,25 @@ unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to)
 	return seg;
 }
 EXPORT_SYMBOL(iov_shorten);
+
+static ssize_t do_iter_readv_writev(struct file *filp, int rw, const struct iovec *iov,
+		unsigned long nr_segs, size_t len, loff_t *ppos, iter_fn_t fn)
+{
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	kiocb.ki_nbytes = len;
+
+	__iov_iter_init(&iter, rw, iov, nr_segs, len);
+	ret = fn(&kiocb, &iter);
+	if (ret == -EIOCBQUEUED)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+	return ret;
+}
 
 ssize_t do_sync_readv_writev(struct file *filp, const struct iovec *iov,
 		unsigned long nr_segs, size_t len, loff_t *ppos, iov_fn_t fn)
@@ -716,6 +876,7 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	ssize_t ret;
 	io_fn_t fn;
 	iov_fn_t fnv;
+	iter_fn_t iter_fn;
 
 	if (!file->f_op) {
 		ret = -EINVAL;
@@ -736,15 +897,20 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	if (type == READ) {
 		fn = file->f_op->read;
 		fnv = file->f_op->aio_read;
+		iter_fn = file->f_op->read_iter;
 	} else {
 		fn = (io_fn_t)file->f_op->write;
 		fnv = file->f_op->aio_write;
+		iter_fn = file->f_op->write_iter;
 	}
 
-	if (fnv)
+	if (iter_fn)
+		ret = do_iter_readv_writev(file, type, iov, nr_segs, tot_len,
+						pos, iter_fn);
+	else if (fnv)
 		ret = do_sync_readv_writev(file, iov, nr_segs, tot_len,
 						pos, fnv);
-	else
+	else 
 		ret = do_loop_readv_writev(file, iov, nr_segs, pos, fn);
 
 out:

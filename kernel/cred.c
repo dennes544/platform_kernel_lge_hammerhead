@@ -756,8 +756,8 @@ EXPORT_SYMBOL(set_security_override_from_ctx);
  */
 int set_create_files_as(struct cred *new, struct inode *inode)
 {
-	new->fsuid = inode->i_uid;
-	new->fsgid = inode->i_gid;
+	new->kfsuid = inode->i_uid;
+	new->kfsgid = inode->i_gid;
 	return security_kernel_create_files_as(new, inode);
 }
 EXPORT_SYMBOL(set_create_files_as);
