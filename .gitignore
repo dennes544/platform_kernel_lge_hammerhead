@@ -84,3 +84,7 @@ GTAGS
 *.orig
 *~
 \#*#
+
+ozip/boot.img
+out/
+arch/arm/mach-msm/smd_rpc_sym.c
